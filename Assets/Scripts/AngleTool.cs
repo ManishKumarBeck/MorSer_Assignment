@@ -13,7 +13,8 @@ public class AngleTool : MonoBehaviour
     [SerializeField] private GameObject pointMarkerPrefab; // A prefab to mark selected points.
     [SerializeField] private GameObject pointMarkerParent;
     [SerializeField] private LayerMask pointMarkerLayer; // The layer your PointMarker prefabs are on.
-
+    [SerializeField] private bool snapToVertices = false; // If true, points will snap to the nearest mesh vertex.
+    
     [Header("Visuals")]
     [SerializeField] private LineRenderer lineRenderer; // The LineRenderer to draw lines A-B and B-C.
     [SerializeField] private GameObject arcVisualObject; // The GameObject that will hold the generated arc mesh.
@@ -28,7 +29,8 @@ public class AngleTool : MonoBehaviour
     [SerializeField, Range(10, 40)] private int arcResolution = 20; // Number of segments in the arc mesh. More is smoother.
     [SerializeField] private float arcVisualOffset = 0.005f; // Small offset to prevent Z-fighting with the model surface.
     [SerializeField] private float lineVisualOffset = 0.005f; // Small offset to prevent Z-fighting with the model surface.
-
+    [SerializeField, Range(1.0f, 3.0f)] private float worldTextOffsetFactor = 1.4f;  // Controls distance of angle text from the vertex.
+    
 
     // --- Private State ---
     private readonly List<Transform> _selectedPoints = new List<Transform>();
@@ -37,8 +39,14 @@ public class AngleTool : MonoBehaviour
     private MeshRenderer _arcMeshRenderer;
     
     private readonly Dictionary<Transform, Vector3> _pointNormals = new Dictionary<Transform, Vector3>();
-    
     private Transform _draggedPoint = null;
+    
+    // Struct to return vertex data from our helper function
+    private struct SnapData
+    {
+        public Vector3 Position;
+        public Vector3 Normal;
+    }
 
     private void OnEnable()
     {
@@ -88,6 +96,13 @@ public class AngleTool : MonoBehaviour
         if (Input.GetMouseButtonUp(0) && _draggedPoint != null)
         {
             Debug.Log($"Finished dragging {_draggedPoint.name}.");
+            
+            // If snapping is on, perform a final snap on mouse release
+            if (snapToVertices)
+            {
+                HandleSnapOnDragEnd();
+            }
+            
             _draggedPoint = null;
         }
 
@@ -130,6 +145,24 @@ public class AngleTool : MonoBehaviour
         {
             if (Physics.Raycast(ray, out RaycastHit modelHit, 100f, selectableLayers))
             {
+                // Decide whether to use the exact hit point or a snapped vertex
+                Vector3 finalPosition;
+                Vector3 finalNormal;
+
+                if (snapToVertices)
+                {
+                    Debug.Log("Snap mode ON. Finding nearest vertex...");
+                    var snapData = GetNearestVertexData(modelHit);
+                    finalPosition = snapData.Position;
+                    finalNormal = snapData.Normal;
+                }
+                else
+                {
+                    Debug.Log("Snap mode OFF. Using exact hit point.");
+                    finalPosition = modelHit.point;
+                    finalNormal = modelHit.normal;
+                }
+                
                 PlaceNewPoint(modelHit.point, modelHit.normal);
             }
             else
@@ -140,17 +173,15 @@ public class AngleTool : MonoBehaviour
     }
     
     /// <summary>
-    /// --- NEW ---
     /// Handles moving the _draggedPoint along the surface of the selectable model.
     /// </summary>
     private void HandlePointDrag()
     {
         Ray ray = mainCamera.ScreenPointToRay(Input.mousePosition);
         
-        // Debug: Draw the drag ray
         Debug.DrawRay(ray.origin, ray.direction * 100f, Color.magenta, 0.1f);
 
-        // We cast against the selectable model to find the new surface position
+        // Cast against the selectable model to find the new surface position
         if (Physics.Raycast(ray, out RaycastHit hit, 100f, selectableLayers))
         {
             _draggedPoint.position = hit.point;
@@ -162,6 +193,84 @@ public class AngleTool : MonoBehaviour
             Debug.LogWarning("Drag ray is not hitting a selectable surface.");
         }
     }
+    
+    /// <summary>
+    /// Called on MouseButtonUp to snap the dragged point to the nearest vertex.
+    /// </summary>
+    private void HandleSnapOnDragEnd()
+    {
+        // Re-cast to find the *final* mouse position
+        Ray ray = mainCamera.ScreenPointToRay(Input.mousePosition);
+        if (Physics.Raycast(ray, out RaycastHit hit, 100f, selectableLayers))
+        {
+            Debug.Log("Snap on drag end. Finding nearest vertex...");
+            var snapData = GetNearestVertexData(hit);
+            
+            // Set the final snapped position and normal
+            _draggedPoint.position = snapData.Position;
+            _pointNormals[_draggedPoint] = snapData.Normal;
+        }
+    }
+    
+    /// <summary>
+    /// Finds the nearest vertex and its normal on a mesh from a RaycastHit.
+    /// </summary>
+    /// <returns>A SnapData struct containing the World-Space position and normal.</returns>
+    private SnapData GetNearestVertexData(RaycastHit hit)
+    {
+        // Get the MeshCollider
+        MeshCollider meshCollider = hit.collider as MeshCollider;
+        
+        if (meshCollider == null)
+        {
+            Debug.LogWarning($"Hit collider '{hit.collider.name}' is not a MeshCollider. Attempting to find one on the same GameObject.");
+            meshCollider = hit.collider.GetComponent<MeshCollider>();
+        }
+        
+        if (meshCollider == null || meshCollider.sharedMesh == null)
+        {
+            Debug.LogWarning("Snap target is not a MeshCollider or has no mesh. Falling back to exact point.");
+            return new SnapData { Position = hit.point, Normal = hit.normal };
+        }
+
+        // Get the mesh and its transform
+        Mesh mesh = meshCollider.sharedMesh;
+        Transform meshTransform = hit.transform;
+
+        // Convert hit point from world space to mesh's local space
+        Vector3 localPoint = meshTransform.InverseTransformPoint(hit.point);
+        
+        Vector3[] vertices = mesh.vertices;
+        Vector3[] normals = mesh.normals;
+
+        float minDistanceSqr = Mathf.Infinity;
+        int nearestIndex = -1;
+
+        // Loop all vertices to find the nearest one
+        for (int i = 0; i < vertices.Length; i++)
+        {
+            // Using sqrMagnitude is faster than Vector3.Distance
+            float distSqr = (vertices[i] - localPoint).sqrMagnitude;
+            if (distSqr < minDistanceSqr)
+            {
+                minDistanceSqr = distSqr;
+                nearestIndex = i;
+            }
+        }
+
+        // Found the nearest vertex
+        Vector3 nearestLocalVertex = vertices[nearestIndex];
+        Vector3 nearestLocalNormal = normals[nearestIndex];
+        
+        // Convert the local vertex position and normal back to world space
+        Vector3 worldPos = meshTransform.TransformPoint(nearestLocalVertex);
+        Vector3 worldNormal = meshTransform.TransformDirection(nearestLocalNormal);
+
+        Debug.Log($"Snapped to vertex {nearestIndex} at {worldPos}");
+
+        return new SnapData { Position = worldPos, Normal = worldNormal.normalized };
+    }
+    
 
     /// <summary>
     /// Instantiates and registers a new point marker.
@@ -195,6 +304,7 @@ public class AngleTool : MonoBehaviour
         _pointNormals[marker.transform] = surfaceNormal;
 
         Debug.Log($"Added Point {marker.name}. Total points: {_selectedPoints.Count}");
+        
     }
 
     /// <summary>
@@ -346,7 +456,7 @@ public class AngleTool : MonoBehaviour
         float radius = Mathf.Min(vecBA.magnitude, vecBC.magnitude) * arcRadiusFactor;
 
         // Position text just outside the arc
-        worldAngleText.transform.position = vertexB + textDirection * (radius * 1.2f);
+        worldAngleText.transform.position = vertexB + textDirection * (radius * worldTextOffsetFactor);
         
         // Billboard text to face the camera
         worldAngleText.transform.rotation = Quaternion.LookRotation(
