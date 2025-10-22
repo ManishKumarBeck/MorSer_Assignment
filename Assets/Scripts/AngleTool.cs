@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using TMPro;
 using UnityEngine.Serialization;
+using UnityEngine.UI;
 
 [RequireComponent(typeof(LineRenderer))]
 public class AngleTool : MonoBehaviour
@@ -14,6 +15,7 @@ public class AngleTool : MonoBehaviour
     [SerializeField] private GameObject pointMarkerParent;
     [SerializeField] private LayerMask pointMarkerLayer; // The layer your PointMarker prefabs are on.
     [SerializeField] private bool snapToVertices = false; // If true, points will snap to the nearest mesh vertex.
+    [SerializeField] private Toggle snapToggle;
     
     [Header("Visuals")]
     [SerializeField] private LineRenderer lineRenderer; // The LineRenderer to draw lines A-B and B-C.
@@ -88,6 +90,8 @@ public class AngleTool : MonoBehaviour
         // 3. Initialize UI and visuals
         Reset();
         Debug.Log("AngleTool Initialized. Ready to select points.");
+        
+        snapToggle.onValueChanged.AddListener(SnapToVertex);
     }
 
     private void Update()
@@ -145,30 +149,33 @@ public class AngleTool : MonoBehaviour
         {
             if (Physics.Raycast(ray, out RaycastHit modelHit, 100f, selectableLayers))
             {
-                // Decide whether to use the exact hit point or a snapped vertex
-                Vector3 finalPosition;
-                Vector3 finalNormal;
-
-                if (snapToVertices)
-                {
-                    Debug.Log("Snap mode ON. Finding nearest vertex...");
-                    var snapData = GetNearestVertexData(modelHit);
-                    finalPosition = snapData.Position;
-                    finalNormal = snapData.Normal;
-                }
-                else
-                {
-                    Debug.Log("Snap mode OFF. Using exact hit point.");
-                    finalPosition = modelHit.point;
-                    finalNormal = modelHit.normal;
-                }
-                
-                PlaceNewPoint(modelHit.point, modelHit.normal);
+                var placementData = GetPlacementData(modelHit);
+                PlaceNewPoint(placementData.Position, placementData.Normal);
             }
             else
             {
                 Debug.Log("Raycast missed. No point selected.");
             }
+        }
+    }
+    
+    /// <summary>
+    /// Determines the correct position and normal for a new point,
+    /// applying snap logic if enabled.
+    /// </summary>
+    /// <param name="modelHit">The raycast hit on the selectable model.</param>
+    /// <returns>A SnapData struct with the final position and normal.</returns>
+    private SnapData GetPlacementData(RaycastHit modelHit)
+    {
+        if (snapToVertices)
+        {
+            Debug.Log("Snap mode ON. Finding nearest vertex...");
+            return GetNearestVertexData(modelHit); // Use the existing snap function
+        }
+        else
+        {
+            Debug.Log("Snap mode OFF. Using exact hit point.");
+            return new SnapData { Position = modelHit.point, Normal = modelHit.normal };
         }
     }
     
@@ -517,5 +524,10 @@ public class AngleTool : MonoBehaviour
         
         ClearVisuals();
         UpdateUI("--");
+    }
+    
+    public void SnapToVertex(bool value)
+    {
+        snapToVertices = value;
     }
 }
