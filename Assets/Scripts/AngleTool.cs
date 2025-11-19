@@ -32,9 +32,13 @@ public class AngleTool : MonoBehaviour
     [SerializeField] private float arcVisualOffset = 0.005f; // Small offset to prevent Z-fighting with the model surface.
     [SerializeField] private float lineVisualOffset = 0.005f; // Small offset to prevent Z-fighting with the model surface.
     [SerializeField, Range(1.0f, 3.0f)] private float worldTextOffsetFactor = 1.4f;  // Controls distance of angle text from the vertex.
-    
+    [SerializeField, Range(0.1f, 1.0f)] private float textAvoidanceFactor = 0.5f;
 
     // --- Private State ---
+    private GameObject[] _arcObjects = new GameObject[3];
+    private Mesh[] _arcMeshes = new Mesh[3];
+    private TextMeshPro[] _textObjects = new TextMeshPro[3];
+    
     private readonly List<Transform> _selectedPoints = new List<Transform>();
     private Mesh _arcMesh;
     private MeshFilter _arcMeshFilter;
@@ -82,6 +86,43 @@ public class AngleTool : MonoBehaviour
         
         _arcMesh = new Mesh { name = "AngleArcMesh" };
         _arcMeshFilter.mesh = _arcMesh;
+        
+        for (int i = 0; i < 3; i++)
+        {
+            // 1. Setup Arc Objects
+            if (i == 0)
+            {
+                _arcObjects[0] = arcVisualObject; // Use the one assigned in Inspector
+            }
+            else
+            {
+                _arcObjects[i] = Instantiate(arcVisualObject, arcVisualObject.transform.parent);
+                _arcObjects[i].name = $"ArcVisual_{i}";
+            }
+
+            // Setup Mesh Components for this arc
+            MeshFilter mf = _arcObjects[i].GetComponent<MeshFilter>();
+            if (mf == null) mf = _arcObjects[i].AddComponent<MeshFilter>();
+        
+            MeshRenderer mr = _arcObjects[i].GetComponent<MeshRenderer>();
+            if (mr == null) mr = _arcObjects[i].AddComponent<MeshRenderer>();
+            mr.material = arcMaterial;
+
+            _arcMeshes[i] = new Mesh { name = $"AngleArcMesh_{i}" };
+            mf.mesh = _arcMeshes[i];
+
+            // 2. Setup Text Objects
+            if (i == 0)
+            {
+                _textObjects[0] = worldAngleText; // Use the one assigned in Inspector
+            }
+            else
+            {
+                _textObjects[i] = Instantiate(worldAngleText, worldAngleText.transform.parent);
+                _textObjects[i].name = $"WorldAngleText_{i}";
+            }
+        }
+        
 
         // 2. Get LineRenderer
         if (lineRenderer == null)
@@ -329,61 +370,64 @@ public class AngleTool : MonoBehaviour
             Reset();
             return;
         }
-
-        // Get positions
-        Vector3 posA = _selectedPoints[0].position;
-        Vector3 posB = _selectedPoints[1].position;
-        Vector3 posC = _selectedPoints[2].position;
-
-        // Calculate vectors from the vertex (B)
-        Vector3 vecBA = posA - posB;
-        Vector3 vecBC = posC - posB;
-
-        // Check for zero-length vectors to prevent errors
-        if (vecBA.sqrMagnitude < 0.0001f || vecBC.sqrMagnitude < 0.0001f)
+        
+        Vector3[] rawPositions = new Vector3[3];
+        for (int i = 0; i < 3; i++)
         {
-            // Points are overlapping, can't calculate angle
-            ClearVisuals();
-            UpdateUI("--");
-            return;
+            rawPositions[i] = _selectedPoints[i].position;
+        }
+        
+        Vector3 triangleCentroid = (rawPositions[0] + rawPositions[1] + rawPositions[2]) / 3f;
+        
+        float lineOffset = lineVisualOffset * 1.1f; 
+        lineRenderer.positionCount = 4; 
+    
+        Vector3[] positions = new Vector3[3];
+        for(int i = 0; i < 3; i++)
+        {
+            // Calculate offset position for this point
+            positions[i] = _selectedPoints[i].position + _pointNormals[_selectedPoints[i]] * lineOffset;
         }
 
-        // Calculate the angle
-        float angle = Vector3.Angle(vecBA, vecBC);
+        // Close the loop by adding the first point at the end
+        lineRenderer.SetPositions(new[] { positions[0], positions[1], positions[2], positions[0] });
+
+        // 2. Loop through all 3 corners to update Arcs and Text
+        for (int i = 0; i < 3; i++)
+        {
+            int currentIdx = i;
+            int nextIdx = (i + 1) % 3;
+            int prevIdx = (i + 2) % 3;
+
+            Vector3 posCenter = rawPositions[currentIdx]; // Use raw position for angle calculations
+            Vector3 posPrev = rawPositions[prevIdx];
+            Vector3 posNext = rawPositions[nextIdx];
+
+            // Calculate vectors relative to the current center
+            Vector3 vecA = posPrev - posCenter;
+            Vector3 vecB = posNext - posCenter;
+
+            // Skip if zero length
+            if (vecA.sqrMagnitude < 0.0001f || vecB.sqrMagnitude < 0.0001f) continue;
+
+            float angle = Vector3.Angle(vecA, vecB);
+
+            // Update the specific mesh and text for THIS index
+            GenerateArcMesh(_arcMeshes[i], posCenter, vecA, vecB, angle);
         
-        // Get the stored normals
-        Vector3 normA = _pointNormals[_selectedPoints[0]];
-        Vector3 normB = _pointNormals[_selectedPoints[1]];
-        Vector3 normC = _pointNormals[_selectedPoints[2]];
-
-        // Calculate offset positions for the LineRenderer to prevent Z-fighting
-        // use a slightly larger offset than the arc to ensure it's on top
-        float lineOffset = lineVisualOffset * 1.1f; 
-
-        Vector3 offsetPosA = posA + normA * lineOffset;
-        Vector3 offsetPosB = posB + normB * lineOffset;
-        Vector3 offsetPosC = posC + normC * lineOffset;
-        
-        // 1. Update Line Renderer
-        lineRenderer.positionCount = 3;
-        lineRenderer.SetPositions(new[] { offsetPosA, offsetPosB, offsetPosC });
-
-        // 2. Update Arc Mesh
-        GenerateArcMesh(posB, vecBA, vecBC, angle);
-
-        // 3. Update World-space Text
-        UpdateWorldText(posB, vecBA, vecBC, angle);
-
-        // 4. Update UI Text
-        UpdateUI(angle.ToString("F1"));
+            // Pass the triangleCentroid to the text update method
+            UpdateWorldText(_textObjects[i], posCenter, vecA, vecB, angle, triangleCentroid);
+        }
+    
+        UpdateUI("Tri");
     }
 
     /// <summary>
     /// Generates the "pie slice" mesh for the arc.
     /// </summary>
-    private void GenerateArcMesh(Vector3 vertexB, Vector3 vecBA, Vector3 vecBC, float angle)
+    private void GenerateArcMesh(Mesh targetMesh, Vector3 vertexB, Vector3 vecBA, Vector3 vecBC, float angle)
     {
-        _arcMesh.Clear();
+        targetMesh.Clear();
 
         // Determine arc radius
         float radius = Mathf.Min(vecBA.magnitude, vecBC.magnitude) * arcRadiusFactor;
@@ -435,18 +479,19 @@ public class AngleTool : MonoBehaviour
             triangles[i * 3 + 2] = i + 1;   
         }
         
-        _arcMesh.vertices = vertices;
-        _arcMesh.triangles = triangles;
-        _arcMesh.RecalculateNormals(); // Recalculate normals 
-        _arcMesh.RecalculateBounds();
+        targetMesh.vertices = vertices;
+        targetMesh.triangles = triangles;
+        targetMesh.RecalculateNormals();
+        targetMesh.RecalculateBounds();
     }
 
     /// <summary>
     /// Positions and updates the world-space angle text.
     /// </summary>
-    private void UpdateWorldText(Vector3 vertexB, Vector3 vecBA, Vector3 vecBC, float angle)
+    private void UpdateWorldText(TMP_Text targetText, Vector3 vertexB, Vector3 vecBA, Vector3 vecBC, float angle, Vector3 triangleCentroid)
     {
-        if (worldAngleText == null) return;
+        //if (worldAngleText == null) return;
+        if (targetText == null) return; 
         
         // Determine axis (same logic as arc)
         Vector3 axis = Vector3.Cross(vecBA, vecBC).normalized;
@@ -461,16 +506,20 @@ public class AngleTool : MonoBehaviour
         Quaternion halfRotation = Quaternion.AngleAxis(angle / 2f, axis);
         Vector3 textDirection = (halfRotation * vecBA.normalized).normalized;
         float radius = Mathf.Min(vecBA.magnitude, vecBC.magnitude) * arcRadiusFactor;
-
-        // Position text just outside the arc
-        worldAngleText.transform.position = vertexB + textDirection * (radius * worldTextOffsetFactor);
         
+        Vector3 baseTextPosition = vertexB + textDirection * (radius * worldTextOffsetFactor);
+        Vector3 directionFromCentroid = (vertexB - triangleCentroid).normalized;
+        Vector3 finalTextPosition = baseTextPosition + directionFromCentroid * textAvoidanceFactor;
+        
+       
+        targetText.transform.position = finalTextPosition;
+    
         // Billboard text to face the camera
-        worldAngleText.transform.rotation = Quaternion.LookRotation(
-            worldAngleText.transform.position - mainCamera.transform.position
+        targetText.transform.rotation = Quaternion.LookRotation(
+            targetText.transform.position - mainCamera.transform.position
         );
-        
-        worldAngleText.text = $"{angle:F1}°";
+    
+        targetText.text = $"{angle:F1}°";
     }
 
     /// <summary>
@@ -523,6 +572,14 @@ public class AngleTool : MonoBehaviour
         _draggedPoint = null; 
         
         ClearVisuals();
+        if (lineRenderer != null) lineRenderer.positionCount = 0;
+    
+        for(int i=0; i<3; i++)
+        {
+            if (_arcMeshes[i] != null) _arcMeshes[i].Clear();
+            if (_textObjects[i] != null) _textObjects[i].text = "";
+        }
+    
         UpdateUI("--");
     }
     
